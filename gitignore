@@ -1,0 +1,17 @@
+# Code::Blocks
+*.depend
+*.layout
+obj/
+bin/
+
+# Build output
+*.exe
+*.o
+*.out
+game
+velocity_rush
+
+# OS / editor cruft
+.vscode/
+*.DS_Store
+Thumbs.db
