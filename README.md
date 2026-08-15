@@ -5,10 +5,14 @@ A 3D racing game built with **C++ and GLUT/OpenGL** (fixed-function pipeline), w
 ![status](https://img.shields.io/badge/status-in--development-yellow)
 
 ## Features
-- Real 3D driving physics: acceleration, braking, friction, and speed-sensitive steering
+- Real 3D driving physics: acceleration, braking, friction, and speed-sensitive steering with a minimum-response floor so low-speed turning never feels dead
 - Off-road penalty — stray from the track and the car drags to a crawl
 - Obstacle collision with push-back
 - Dynamic lighting: a fixed "sun" light plus a spotlight that follows the car as headlights
+- Boxy Land Cruiser-style SUV: two-tone painted body, roof rack, front grille and bumpers, lit headlights/taillights, and a rear-mounted spare tire
+- Procedurally generated textures (grass ground, asphalt road, two-tone SUV paint) — no external image files needed
+- Distance fog and a gradient sky background for atmosphere
+- HUD with translucent panels, a color-coded speed bar, and a checkpoint progress bar
 - Checkpoint/lap system with a live timer
 - Three levels of increasing difficulty (wide oval → switchback → tight night course)
 - Third-person chase camera
@@ -58,12 +62,14 @@ Everything lives in `main.cpp`, organized into numbered sections so it's easy to
 10. **main()** — window + callback setup
 
 ## Roadmap
+- [x] Textured ground, road, and car instead of flat colors
+- [x] Distance fog + gradient sky
+- [x] HUD panels with a speed bar and progress bar
 - [ ] Lap-based looping tracks (currently point-to-point)
 - [ ] Simple particle effects for tire skid / dust
 - [ ] Sound (engine hum, collision thud) — GLUT has no audio API, so this needs an external lib or platform sound calls
 - [ ] Minimap HUD
 - [ ] Ghost/best-time replay
-- [ ] Textured ground and car instead of flat colors
 
 ## License
 MIT — do whatever you'd like with it.
