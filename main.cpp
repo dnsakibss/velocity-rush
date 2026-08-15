@@ -1,5 +1,5 @@
 /* ================================================================
-   VELOCITY RUSH — a 3D racing game
+   VELOCITY RUSH â€” a 3D racing game
    ----------------------------------------------------------------
    Engine   : GLUT / OpenGL fixed-function pipeline
    Language : C++ (needs C++11 for the vector initializer lists)
@@ -19,11 +19,13 @@
 #include <GL/glut.h>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cctype>
 #include <vector>
 #include <string>
 
 // ----------------------------------------------------------------
-// SECTION 1 — MATH HELPERS
+// SECTION 1 â€” MATH HELPERS
 // Everything below is standard "gameplay math": vectors, distances,
 // and one function (pointSegmentDistance) that answers "how far is
 // the car from the road?" which drives the off-road physics.
@@ -61,7 +63,101 @@ float pointSegmentDistance(const Vec3& p, const Vec3& a, const Vec3& b) {
 }
 
 // ----------------------------------------------------------------
-// SECTION 2 — GAME DATA STRUCTURES
+// SECTION 1B â€” PROCEDURAL TEXTURES
+// Rather than loading external image files (which would mean extra
+// assets to ship alongside main.cpp and extra Code::Blocks setup),
+// each texture is built pixel-by-pixel in code, then uploaded to the
+// GPU once at startup. Same GPU-side result, zero external files.
+// ----------------------------------------------------------------
+GLuint grassTexture = 0;
+GLuint asphaltTexture = 0;
+GLuint suvBodyTexture = 0;
+
+unsigned char clampByte(int v) {
+    if (v < 0) return 0;
+    if (v > 255) return 255;
+    return (unsigned char)v;
+}
+
+// Uploads an RGB pixel buffer as a repeating, mipmapped texture and
+// returns its GPU texture id.
+GLuint uploadTexture(unsigned char* pixels, int size) {
+    GLuint id;
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGB, size, size, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+    return id;
+}
+
+// Mottled green with a faint patchwork pattern, like turf seen from a car.
+GLuint createGrassTexture(int size = 128) {
+    unsigned char* pix = new unsigned char[size * size * 3];
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            int n = (rand() % 40) - 20;
+            int patch = ((x / 6) + (y / 6)) % 2;
+            int idx = (y * size + x) * 3;
+            pix[idx + 0] = clampByte(55 + patch * 8 + n);
+            pix[idx + 1] = clampByte(130 + patch * 15 + n);
+            pix[idx + 2] = clampByte(55 + patch * 8 + n);
+        }
+    }
+    GLuint id = uploadTexture(pix, size);
+    delete[] pix;
+    return id;
+}
+
+// Grainy dark gray, like tarmac.
+GLuint createAsphaltTexture(int size = 128) {
+    unsigned char* pix = new unsigned char[size * size * 3];
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            int n = (rand() % 30) - 15;
+            int base = 60 + n;
+            int idx = (y * size + x) * 3;
+            pix[idx + 0] = clampByte(base);
+            pix[idx + 1] = clampByte(base);
+            pix[idx + 2] = clampByte(base + 3);
+        }
+    }
+    GLuint id = uploadTexture(pix, size);
+    delete[] pix;
+    return id;
+}
+
+// Two-tone SUV paint: a dark "cladding" band low on the body (like the
+// protective black plastic on the lower doors/bumpers of a real SUV),
+// with lighter paint above. Mapped onto the chassis box in drawCar().
+GLuint createSUVBodyTexture(int size = 128) {
+    unsigned char* pix = new unsigned char[size * size * 3];
+    for (int y = 0; y < size; y++) {
+        float t = (float)y / (float)(size - 1); // 0 = bottom of the panel, 1 = top
+        bool cladding = t < 0.32f;
+        for (int x = 0; x < size; x++) {
+            int n = (rand() % 14) - 7;
+            int idx = (y * size + x) * 3;
+            if (cladding) {
+                pix[idx + 0] = clampByte(35 + n);
+                pix[idx + 1] = clampByte(35 + n);
+                pix[idx + 2] = clampByte(38 + n);
+            } else {
+                pix[idx + 0] = clampByte(225 + n);
+                pix[idx + 1] = clampByte(222 + n);
+                pix[idx + 2] = clampByte(210 + n);
+            }
+        }
+    }
+    GLuint id = uploadTexture(pix, size);
+    delete[] pix;
+    return id;
+}
+
+// ----------------------------------------------------------------
+// SECTION 2 â€” GAME DATA STRUCTURES
 // ----------------------------------------------------------------
 struct Obstacle {
     Vec3 position;
@@ -86,7 +182,7 @@ struct Car {
 enum GameState { MENU, PLAYING, LEVEL_COMPLETE, ALL_COMPLETE };
 
 // ----------------------------------------------------------------
-// SECTION 3 — GLOBAL STATE
+// SECTION 3 â€” GLOBAL STATE
 // ----------------------------------------------------------------
 int windowWidth = 1000, windowHeight = 700;
 
@@ -105,18 +201,18 @@ int prevTimeMs = 0;
 
 GLUquadric* quadric = NULL;
 
-// Tunable physics constants — change these to make the game feel
+// Tunable physics constants â€” change these to make the game feel
 // different (arcade-y vs. heavier / more "sim").
-const float ACCELERATION = 22.0f;
-const float BRAKE_DECEL  = 34.0f;
-const float FRICTION     = 14.0f;
+const float ACCELERATION = 30.0f;
+const float BRAKE_DECEL  = 40.0f;
+const float FRICTION     = 12.0f;
 const float OFFROAD_DRAG = 46.0f;
-const float MAX_SPEED    = 42.0f;
-const float MAX_REVERSE  = -16.0f;
-const float TURN_RATE    = 130.0f; // degrees/sec at full speed
+const float MAX_SPEED    = 46.0f;
+const float MAX_REVERSE  = -18.0f;
+const float TURN_RATE    = 170.0f; // degrees/sec at full speed
 
 // ----------------------------------------------------------------
-// SECTION 4 — LEVEL DATA
+// SECTION 4 â€” LEVEL DATA
 // Each level is a hand-authored path of waypoints. Consecutive
 // waypoints become road segments; every waypoint after the first is
 // a checkpoint the player must reach in order.
@@ -176,14 +272,14 @@ void startLevel(int index) {
     Vec3 dir = (lvl.waypoints[1] - lvl.waypoints[0]).normalized();
     car.heading = atan2f(dir.x, dir.z) / DEG2RAD;
     car.speed = 0.0f;
-    car.radius = 1.2f;
+    car.radius = 1.5f;
     nextCheckpoint = 1;
     levelTimer = 0.0f;
     gameState = PLAYING;
 }
 
 // ----------------------------------------------------------------
-// SECTION 5 — PHYSICS
+// SECTION 5 â€” PHYSICS
 // Runs every frame. Handles acceleration/braking/friction, an
 // off-road drag penalty, steering, obstacle collision, and
 // checkpoint progress.
@@ -191,8 +287,8 @@ void startLevel(int index) {
 void updateCar(float dt) {
     Level& lvl = levels[currentLevelIndex];
 
-    bool accel = keyDown['w'] || keyDown['W'] || specialKeyDown[GLUT_KEY_UP];
-    bool brake = keyDown['s'] || keyDown['S'] || specialKeyDown[GLUT_KEY_DOWN];
+    bool accel = keyDown['w'] || specialKeyDown[GLUT_KEY_UP];
+    bool brake = keyDown['s'] || specialKeyDown[GLUT_KEY_DOWN];
 
     if (accel) car.speed += ACCELERATION * dt;
     else if (brake) car.speed -= BRAKE_DECEL * dt;
@@ -217,11 +313,22 @@ void updateCar(float dt) {
     if (car.speed > MAX_SPEED) car.speed = MAX_SPEED;
     if (car.speed < MAX_REVERSE) car.speed = MAX_REVERSE;
 
-    bool left  = keyDown['a'] || keyDown['A'] || specialKeyDown[GLUT_KEY_LEFT];
-    bool right = keyDown['d'] || keyDown['D'] || specialKeyDown[GLUT_KEY_RIGHT];
-    float speedFactor = car.speed / MAX_SPEED; // flips steering sense in reverse, like a real car
-    if (left)  car.heading -= TURN_RATE * dt * speedFactor;
-    if (right) car.heading += TURN_RATE * dt * speedFactor;
+    bool left  = keyDown['a'] || specialKeyDown[GLUT_KEY_LEFT];
+    bool right = keyDown['d'] || specialKeyDown[GLUT_KEY_RIGHT];
+
+    // Steering strength scales with speed (fast = sharper turns), but is
+    // floored at 35% so tapping A/D at low speed still visibly responds
+    // instead of feeling dead. Sign still flips in reverse, like a real car.
+    float speedMag = fabs(car.speed) / MAX_SPEED;
+    if (speedMag < 0.35f) speedMag = 0.35f;
+    float speedFactor = (car.speed < 0 ? -1.0f : 1.0f) * speedMag;
+    // NOTE: with forward = (sin(heading), 0, cos(heading)) and a right-handed
+    // coordinate system, INCREASING heading actually swings the car toward
+    // world -X, which is the driver's left, not right. So "turn right" has
+    // to DECREASE heading, and "turn left" has to INCREASE it â€” this looks
+    // backwards at first glance but it's what makes A/D feel correct.
+    if (left)  car.heading += TURN_RATE * dt * speedFactor;
+    if (right) car.heading -= TURN_RATE * dt * speedFactor;
 
     float rad = car.heading * DEG2RAD;
     Vec3 forward(sinf(rad), 0, cosf(rad));
@@ -255,7 +362,7 @@ void updateCar(float dt) {
 }
 
 // ----------------------------------------------------------------
-// SECTION 6 — CAMERA & LIGHTING
+// SECTION 6 â€” CAMERA & LIGHTING
 // ----------------------------------------------------------------
 void applyCamera() {
     float rad = car.heading * DEG2RAD;
@@ -286,7 +393,7 @@ void initGL() {
     glShadeModel(GL_SMOOTH);
     glClearColor(0.55f, 0.75f, 0.95f, 1.0f);
 
-    // LIGHT0 = the "sun" — fixed over the whole scene
+    // LIGHT0 = the "sun" â€” fixed over the whole scene
     GLfloat sunPos[]     = { 60.0f, 100.0f, 40.0f, 1.0f };
     GLfloat sunAmbient[] = { 0.35f, 0.35f, 0.38f, 1.0f };
     GLfloat sunDiffuse[] = { 0.85f, 0.82f, 0.70f, 1.0f };
@@ -294,7 +401,7 @@ void initGL() {
     glLightfv(GL_LIGHT0, GL_AMBIENT,  sunAmbient);
     glLightfv(GL_LIGHT0, GL_DIFFUSE,  sunDiffuse);
 
-    // LIGHT1 = the car's headlights — a spotlight, repositioned every frame
+    // LIGHT1 = the car's headlights â€” a spotlight, repositioned every frame
     GLfloat hlDiffuse[] = { 1.0f, 1.0f, 0.85f, 1.0f };
     glLightfv(GL_LIGHT1, GL_DIFFUSE, hlDiffuse);
     glLightf(GL_LIGHT1, GL_SPOT_CUTOFF, 25.0f);
@@ -302,26 +409,50 @@ void initGL() {
     glLightf(GL_LIGHT1, GL_CONSTANT_ATTENUATION, 1.0f);
     glLightf(GL_LIGHT1, GL_LINEAR_ATTENUATION, 0.02f);
 
+    // Distance fog: makes the far edges of the track fade into the sky
+    // instead of stopping abruptly, which reads as much more "finished."
+    GLfloat fogColor[] = { 0.55f, 0.75f, 0.95f, 1.0f };
+    glEnable(GL_FOG);
+    glFogi(GL_FOG_MODE, GL_LINEAR);
+    glFogfv(GL_FOG_COLOR, fogColor);
+    glFogf(GL_FOG_START, 80.0f);
+    glFogf(GL_FOG_END, 260.0f);
+    glHint(GL_FOG_HINT, GL_NICEST);
+
+    glTexEnvi(GL_TEXTURE_2D, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    srand(1337); // fixed seed so the generated textures look the same every run
+    grassTexture = createGrassTexture();
+    asphaltTexture = createAsphaltTexture();
+    suvBodyTexture = createSUVBodyTexture();
+
     quadric = gluNewQuadric();
 }
 
 // ----------------------------------------------------------------
-// SECTION 7 — DRAWING
+// SECTION 7 â€” DRAWING
 // ----------------------------------------------------------------
 void drawGround() {
-    glColor3f(0.25f, 0.55f, 0.25f);
+    glColor3f(1, 1, 1); // white so the texture's own colors show through unmodified
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, grassTexture);
     glNormal3f(0, 1, 0);
+    const float tile = 8.0f; // world units per texture repeat
     glBegin(GL_QUADS);
-        glVertex3f(-300, -0.05f, -300);
-        glVertex3f(-300, -0.05f,  300);
-        glVertex3f( 300, -0.05f,  300);
-        glVertex3f( 300, -0.05f, -300);
+        glTexCoord2f(-300 / tile, -300 / tile); glVertex3f(-300, -0.05f, -300);
+        glTexCoord2f(-300 / tile,  300 / tile); glVertex3f(-300, -0.05f,  300);
+        glTexCoord2f( 300 / tile,  300 / tile); glVertex3f( 300, -0.05f,  300);
+        glTexCoord2f( 300 / tile, -300 / tile); glVertex3f( 300, -0.05f, -300);
     glEnd();
+    glDisable(GL_TEXTURE_2D);
 }
 
 void drawRoad(Level& lvl) {
+    glColor3f(1, 1, 1);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, asphaltTexture);
     glNormal3f(0, 1, 0);
-    glColor3f(lvl.roadColor.x, lvl.roadColor.y, lvl.roadColor.z);
+    const float tile = 6.0f; // world units per texture repeat, along the road's length
+    float vCoord = 0.0f;      // running length so the texture tiles seamlessly segment to segment
     glBegin(GL_QUADS);
     for (size_t i = 0; i + 1 < lvl.waypoints.size(); i++) {
         Vec3 a = lvl.waypoints[i];
@@ -331,12 +462,18 @@ void drawRoad(Level& lvl) {
         Vec3 half = perp * (lvl.trackWidth * 0.5f);
         Vec3 a1 = a + half, a2 = a - half;
         Vec3 b1 = b + half, b2 = b - half;
-        glVertex3f(a1.x, 0.01f, a1.z);
-        glVertex3f(a2.x, 0.01f, a2.z);
-        glVertex3f(b2.x, 0.01f, b2.z);
-        glVertex3f(b1.x, 0.01f, b1.z);
+
+        float v0 = vCoord;
+        float v1 = vCoord + dist(a, b) / tile;
+        vCoord = v1;
+
+        glTexCoord2f(0, v0); glVertex3f(a1.x, 0.01f, a1.z);
+        glTexCoord2f(1, v0); glVertex3f(a2.x, 0.01f, a2.z);
+        glTexCoord2f(1, v1); glVertex3f(b2.x, 0.01f, b2.z);
+        glTexCoord2f(0, v1); glVertex3f(b1.x, 0.01f, b1.z);
     }
     glEnd();
+    glDisable(GL_TEXTURE_2D);
 }
 
 void drawCheckpointGates(Level& lvl) {
@@ -369,45 +506,252 @@ void drawObstacles(Level& lvl) {
     }
 }
 
+// Draws a w*h*d box centered at the origin, with correct per-face
+// normals AND 0..1 texture coordinates on every face. glutSolidCube
+// doesn't expose texture coordinates, so the car body needs this
+// instead in order to show the paint/stripe texture.
+void drawTexturedBox(float w, float h, float d) {
+    float x = w * 0.5f, y = h * 0.5f, z = d * 0.5f;
+    glBegin(GL_QUADS);
+        // front (+z)
+        glNormal3f(0, 0, 1);
+        glTexCoord2f(0, 0); glVertex3f(-x, -y, z);
+        glTexCoord2f(1, 0); glVertex3f( x, -y, z);
+        glTexCoord2f(1, 1); glVertex3f( x,  y, z);
+        glTexCoord2f(0, 1); glVertex3f(-x,  y, z);
+        // back (-z)
+        glNormal3f(0, 0, -1);
+        glTexCoord2f(0, 0); glVertex3f( x, -y, -z);
+        glTexCoord2f(1, 0); glVertex3f(-x, -y, -z);
+        glTexCoord2f(1, 1); glVertex3f(-x,  y, -z);
+        glTexCoord2f(0, 1); glVertex3f( x,  y, -z);
+        // left (-x)
+        glNormal3f(-1, 0, 0);
+        glTexCoord2f(0, 0); glVertex3f(-x, -y, -z);
+        glTexCoord2f(1, 0); glVertex3f(-x, -y,  z);
+        glTexCoord2f(1, 1); glVertex3f(-x,  y,  z);
+        glTexCoord2f(0, 1); glVertex3f(-x,  y, -z);
+        // right (+x)
+        glNormal3f(1, 0, 0);
+        glTexCoord2f(0, 0); glVertex3f(x, -y,  z);
+        glTexCoord2f(1, 0); glVertex3f(x, -y, -z);
+        glTexCoord2f(1, 1); glVertex3f(x,  y, -z);
+        glTexCoord2f(0, 1); glVertex3f(x,  y,  z);
+        // top (+y)
+        glNormal3f(0, 1, 0);
+        glTexCoord2f(0, 0); glVertex3f(-x, y,  z);
+        glTexCoord2f(1, 0); glVertex3f( x, y,  z);
+        glTexCoord2f(1, 1); glVertex3f( x, y, -z);
+        glTexCoord2f(0, 1); glVertex3f(-x, y, -z);
+        // bottom (-y)
+        glNormal3f(0, -1, 0);
+        glTexCoord2f(0, 0); glVertex3f(-x, -y, -z);
+        glTexCoord2f(1, 0); glVertex3f( x, -y, -z);
+        glTexCoord2f(1, 1); glVertex3f( x, -y,  z);
+        glTexCoord2f(0, 1); glVertex3f(-x, -y,  z);
+    glEnd();
+}
+
+// A wheel with a hubcap on both faces so it looks right from either side
+// without needing to reason about which way is "outward."
+void drawWheel(float radius, float width) {
+    glPushMatrix();
+    glTranslatef(0, 0, -width * 0.5f);
+    glColor3f(0.05f, 0.05f, 0.05f);
+    gluCylinder(quadric, radius, radius, width, 14, 2);
+    glColor3f(0.72f, 0.72f, 0.76f);
+    gluDisk(quadric, 0, radius * 0.55f, 14, 1);
+    glPushMatrix();
+    glTranslatef(0, 0, width);
+    gluDisk(quadric, 0, radius * 0.55f, 14, 1);
+    glPopMatrix();
+    glPopMatrix();
+}
+
 void drawCar() {
     glPushMatrix();
-    glTranslatef(car.position.x, 0.55f, car.position.z);
+    glTranslatef(car.position.x, 0, car.position.z);
     glRotatef(car.heading, 0, 1, 0);
 
-    glColor3f(0.85f, 0.1f, 0.15f);
-    glPushMatrix(); glScalef(1.6f, 0.7f, 3.2f); glutSolidCube(1.0); glPopMatrix();
+    const float wheelRadius = 0.45f;
+    const float wheelWidth  = 0.32f;
+    const float chassisW = 1.9f, chassisH = 0.62f, chassisL = 3.7f;
+    const float roofW = 1.6f, roofH = 0.58f, roofL = 2.0f;
+    const float chassisY = wheelRadius + chassisH * 0.5f;
+    const float roofY = wheelRadius + chassisH + roofH * 0.5f;
+    const float roofZOffset = -0.35f; // set back toward the rear, leaving a hood up front
 
-    glColor3f(0.65f, 0.85f, 0.95f);
+    // chassis â€” two-tone SUV paint (dark cladding low, light paint above)
+    glColor3f(1, 1, 1);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, suvBodyTexture);
     glPushMatrix();
-    glTranslatef(0, 0.55f, -0.2f);
-    glScalef(1.2f, 0.55f, 1.6f);
+    glTranslatef(0, chassisY, 0);
+    drawTexturedBox(chassisW, chassisH, chassisL);
+    glPopMatrix();
+    glDisable(GL_TEXTURE_2D);
+
+    // roof / cabin, set back to leave a flat hood at the front
+    glColor3f(0.92f, 0.90f, 0.85f);
+    glPushMatrix();
+    glTranslatef(0, roofY, roofZOffset);
+    glScalef(roofW, roofH, roofL);
     glutSolidCube(1.0);
     glPopMatrix();
 
-    glColor3f(0.05f, 0.05f, 0.05f);
-    float wx = 0.85f, wy = -0.35f, wz = 1.1f;
-    Vec3 wheelPos[4] = { Vec3(-wx, wy, wz), Vec3(wx, wy, wz), Vec3(-wx, wy, -wz), Vec3(wx, wy, -wz) };
+    // front & rear bumpers, plus a grille block up front
+    glColor3f(0.08f, 0.08f, 0.09f);
+    glPushMatrix();
+    glTranslatef(0, wheelRadius + 0.15f, chassisL * 0.5f + 0.05f);
+    glScalef(chassisW + 0.1f, 0.3f, 0.15f);
+    glutSolidCube(1.0);
+    glPopMatrix();
+    glPushMatrix();
+    glTranslatef(0, wheelRadius + 0.15f, -chassisL * 0.5f - 0.05f);
+    glScalef(chassisW + 0.1f, 0.3f, 0.15f);
+    glutSolidCube(1.0);
+    glPopMatrix();
+    glPushMatrix();
+    glTranslatef(0, chassisY + 0.05f, chassisL * 0.5f + 0.02f);
+    glScalef(chassisW * 0.55f, chassisH * 0.55f, 0.06f);
+    glutSolidCube(1.0);
+    glPopMatrix();
+
+    // headlights (lit via emission so they read as "on") and taillights
+    float hlx = chassisW * 0.38f;
+    float hly = chassisY + 0.05f;
+    GLfloat glowOn[]  = { 1.0f, 0.95f, 0.6f, 1.0f };
+    GLfloat glowOff[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    for (int side = -1; side <= 1; side += 2) {
+        glMaterialfv(GL_FRONT, GL_EMISSION, glowOn);
+        glColor3f(1.0f, 0.95f, 0.7f);
+        glPushMatrix();
+        glTranslatef(side * hlx, hly, chassisL * 0.5f + 0.05f);
+        glScalef(0.22f, 0.14f, 0.06f);
+        glutSolidCube(1.0);
+        glPopMatrix();
+        glMaterialfv(GL_FRONT, GL_EMISSION, glowOff);
+    }
+    for (int side = -1; side <= 1; side += 2) {
+        glColor3f(0.75f, 0.1f, 0.1f);
+        glPushMatrix();
+        glTranslatef(side * hlx, hly, -chassisL * 0.5f - 0.05f);
+        glScalef(0.2f, 0.16f, 0.06f);
+        glutSolidCube(1.0);
+        glPopMatrix();
+    }
+
+    // roof rack â€” two side rails plus three cross bars
+    glColor3f(0.08f, 0.08f, 0.08f);
+    float rackY = roofY + roofH * 0.5f + 0.04f;
+    for (int side = -1; side <= 1; side += 2) {
+        glPushMatrix();
+        glTranslatef(side * roofW * 0.42f, rackY, roofZOffset);
+        glScalef(0.06f, 0.06f, roofL * 0.95f);
+        glutSolidCube(1.0);
+        glPopMatrix();
+    }
+    for (int i = 0; i < 3; i++) {
+        float zc = roofZOffset - roofL * 0.35f + i * (roofL * 0.35f);
+        glPushMatrix();
+        glTranslatef(0, rackY, zc);
+        glScalef(roofW * 0.8f, 0.05f, 0.06f);
+        glutSolidCube(1.0);
+        glPopMatrix();
+    }
+
+    // spare tire mounted on the tailgate â€” the classic Land Cruiser silhouette
+    glPushMatrix();
+    glTranslatef(0, chassisY, -chassisL * 0.5f - 0.16f);
+    glRotatef(90, 0, 1, 0);
+    drawWheel(wheelRadius * 0.85f, 0.18f);
+    glPopMatrix();
+
+    // wheels
+    float wx = chassisW * 0.5f - 0.05f;
+    float wz = chassisL * 0.34f;
+    Vec3 wheelPos[4] = {
+        Vec3(-wx, wheelRadius, wz), Vec3(wx, wheelRadius, wz),
+        Vec3(-wx, wheelRadius, -wz), Vec3(wx, wheelRadius, -wz)
+    };
     for (int i = 0; i < 4; i++) {
         glPushMatrix();
         glTranslatef(wheelPos[i].x, wheelPos[i].y, wheelPos[i].z);
         glRotatef(90, 0, 1, 0);
-        gluCylinder(quadric, 0.35f, 0.35f, 0.3f, 10, 2);
+        drawWheel(wheelRadius, wheelWidth);
         glPopMatrix();
     }
+
     glPopMatrix();
 }
 
 // ----------------------------------------------------------------
-// SECTION 8 — HUD (2D text overlay)
+// SECTION 8 â€” SKY BACKGROUND + HUD (2D overlays)
 // ----------------------------------------------------------------
+
+// Full-screen vertical gradient, drawn before the 3D scene each frame
+// so the horizon looks like open sky instead of a flat clear color.
+void drawSky() {
+    glDisable(GL_LIGHTING);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_FOG);
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    gluOrtho2D(0, windowWidth, 0, windowHeight);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    glBegin(GL_QUADS);
+        glColor3f(0.35f, 0.55f, 0.85f); // deep sky at the top
+        glVertex2f(0, windowHeight);
+        glVertex2f(windowWidth, windowHeight);
+        glColor3f(0.78f, 0.88f, 0.98f); // pale near the horizon
+        glVertex2f(windowWidth, windowHeight * 0.45f);
+        glVertex2f(0, windowHeight * 0.45f);
+    glEnd();
+
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_LIGHTING);
+    glEnable(GL_FOG);
+}
+
 void drawText(float x, float y, const std::string& text, void* font = GLUT_BITMAP_HELVETICA_18) {
     glRasterPos2f(x, y);
     for (size_t i = 0; i < text.size(); i++) glutBitmapCharacter(font, text[i]);
 }
 
+// Solid translucent rectangle â€” the building block for HUD panels.
+void drawRect(float x, float y, float w, float h, float r, float g, float b, float a) {
+    glColor4f(r, g, b, a);
+    glBegin(GL_QUADS);
+        glVertex2f(x, y); glVertex2f(x + w, y);
+        glVertex2f(x + w, y + h); glVertex2f(x, y + h);
+    glEnd();
+}
+
+void drawRectOutline(float x, float y, float w, float h, float r, float g, float b, float a) {
+    glColor4f(r, g, b, a);
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(x, y); glVertex2f(x + w, y);
+        glVertex2f(x + w, y + h); glVertex2f(x, y + h);
+    glEnd();
+}
+
 void drawHUD() {
     glDisable(GL_LIGHTING);
     glDisable(GL_DEPTH_TEST);
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_FOG);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
@@ -417,29 +761,66 @@ void drawHUD() {
     glLoadIdentity();
 
     char buf[128];
-    glColor3f(1, 1, 1);
 
     if (gameState == MENU) {
-        drawText(windowWidth / 2 - 150, windowHeight / 2 + 40, "VELOCITY RUSH", GLUT_BITMAP_TIMES_ROMAN_24);
-        drawText(windowWidth / 2 - 160, windowHeight / 2, "Press ENTER to start racing");
-        drawText(windowWidth / 2 - 200, windowHeight / 2 - 30, "W/S accelerate & brake, A/D steer, R restart");
+        float pw = 460, ph = 220;
+        float px = windowWidth / 2 - pw / 2, py = windowHeight / 2 - ph / 2;
+        drawRect(px, py, pw, ph, 0.05f, 0.05f, 0.08f, 0.65f);
+        drawRect(px, py + ph - 8, pw, 8, 0.9f, 0.25f, 0.15f, 0.95f); // accent stripe
+        drawRectOutline(px, py, pw, ph, 1, 1, 1, 0.25f);
+
+        glColor4f(1, 1, 1, 1);
+        drawText(px + 65, py + ph - 55, "VELOCITY RUSH", GLUT_BITMAP_TIMES_ROMAN_24);
+        glColor4f(0.85f, 0.85f, 0.9f, 1);
+        drawText(px + 90, py + ph - 100, "Press ENTER to start racing");
+        drawText(px + 40, py + 70, "W / S   -   accelerate & brake");
+        drawText(px + 40, py + 48, "A / D   -   steer left & right");
+        drawText(px + 40, py + 26, "R  -  restart          ESC  -  quit");
     } else if (gameState == PLAYING) {
         Level& lvl = levels[currentLevelIndex];
-        sprintf(buf, "Level %d/%d - %s", currentLevelIndex + 1, (int)levels.size(), lvl.name.c_str());
-        drawText(20, windowHeight - 30, buf);
-        sprintf(buf, "Time: %.1fs", levelTimer);
-        drawText(20, windowHeight - 55, buf);
-        sprintf(buf, "Checkpoint: %d/%d", nextCheckpoint, (int)lvl.waypoints.size() - 1);
-        drawText(20, windowHeight - 80, buf);
-        sprintf(buf, "Speed: %.0f", fabs(car.speed));
-        drawText(20, windowHeight - 105, buf);
+
+        drawRect(15, windowHeight - 135, 260, 120, 0.05f, 0.05f, 0.08f, 0.55f);
+        drawRectOutline(15, windowHeight - 135, 260, 120, 1, 1, 1, 0.2f);
+
+        glColor4f(1, 1, 1, 1);
+        drawText(28, windowHeight - 25, lvl.name, GLUT_BITMAP_HELVETICA_18);
+        sprintf(buf, "Level %d/%d   Time %.1fs", currentLevelIndex + 1, (int)levels.size(), levelTimer);
+        drawText(28, windowHeight - 48, buf);
+
+        // speed bar: green at low speed, sliding to red near top speed
+        float sr = fabs(car.speed) / MAX_SPEED;
+        if (sr > 1) sr = 1;
+        drawText(28, windowHeight - 92, "Speed");
+        drawRect(85, windowHeight - 98, 175, 12, 0.2f, 0.2f, 0.22f, 0.9f);
+        float barR = sr < 0.5f ? 0.2f + sr * 1.2f : 0.9f;
+        float barG = sr < 0.5f ? 0.75f : 0.85f - (sr - 0.5f) * 1.4f;
+        drawRect(85, windowHeight - 98, 175 * sr, 12, barR, barG, 0.2f, 0.95f);
+
+        // checkpoint progress bar
+        float cpRatio = (float)(nextCheckpoint - 1) / (float)(lvl.waypoints.size() - 1);
+        drawText(28, windowHeight - 118, "Progress");
+        drawRect(95, windowHeight - 124, 165, 8, 0.2f, 0.2f, 0.22f, 0.9f);
+        drawRect(95, windowHeight - 124, 165 * cpRatio, 8, 0.3f, 0.8f, 0.4f, 0.95f);
+
     } else if (gameState == LEVEL_COMPLETE) {
-        sprintf(buf, "LEVEL COMPLETE! Time: %.1fs", lastLevelTime);
-        drawText(windowWidth / 2 - 140, windowHeight / 2 + 20, buf);
-        drawText(windowWidth / 2 - 150, windowHeight / 2 - 10, "Press ENTER to continue");
+        float pw = 420, ph = 130;
+        float px = windowWidth / 2 - pw / 2, py = windowHeight / 2 - ph / 2;
+        drawRect(px, py, pw, ph, 0.05f, 0.08f, 0.05f, 0.7f);
+        drawRectOutline(px, py, pw, ph, 0.3f, 0.9f, 0.3f, 0.4f);
+        glColor4f(0.6f, 1.0f, 0.6f, 1);
+        sprintf(buf, "LEVEL COMPLETE - %.1fs", lastLevelTime);
+        drawText(px + 45, py + ph - 55, buf, GLUT_BITMAP_TIMES_ROMAN_24);
+        glColor4f(1, 1, 1, 1);
+        drawText(px + 90, py + 35, "Press ENTER to continue");
     } else if (gameState == ALL_COMPLETE) {
-        drawText(windowWidth / 2 - 150, windowHeight / 2 + 20, "ALL LEVELS COMPLETE!");
-        drawText(windowWidth / 2 - 170, windowHeight / 2 - 10, "Press R to race again from Level 1");
+        float pw = 460, ph = 130;
+        float px = windowWidth / 2 - pw / 2, py = windowHeight / 2 - ph / 2;
+        drawRect(px, py, pw, ph, 0.08f, 0.07f, 0.02f, 0.7f);
+        drawRectOutline(px, py, pw, ph, 0.95f, 0.8f, 0.2f, 0.5f);
+        glColor4f(1.0f, 0.85f, 0.3f, 1);
+        drawText(px + 45, py + ph - 55, "ALL LEVELS COMPLETE!", GLUT_BITMAP_TIMES_ROMAN_24);
+        glColor4f(1, 1, 1, 1);
+        drawText(px + 55, py + 35, "Press R to race again from Level 1");
     }
 
     glPopMatrix();
@@ -447,15 +828,18 @@ void drawHUD() {
     glPopMatrix();
     glMatrixMode(GL_MODELVIEW);
 
+    glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_LIGHTING);
+    glEnable(GL_FOG);
 }
 
 // ----------------------------------------------------------------
-// SECTION 9 — GLUT CALLBACKS
+// SECTION 9 â€” GLUT CALLBACKS
 // ----------------------------------------------------------------
 void display() {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    drawSky();
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
@@ -489,6 +873,7 @@ void reshape(int w, int h) {
 }
 
 void keyboardDown(unsigned char key, int, int) {
+    key = (unsigned char)tolower(key);
     keyDown[key] = true;
     if (key == 13) { // Enter
         if (gameState == MENU) startLevel(0);
@@ -497,14 +882,14 @@ void keyboardDown(unsigned char key, int, int) {
             else gameState = ALL_COMPLETE;
         }
     }
-    if (key == 'r' || key == 'R') {
+    if (key == 'r') {
         if (gameState == PLAYING || gameState == LEVEL_COMPLETE) startLevel(currentLevelIndex);
         else if (gameState == ALL_COMPLETE) startLevel(0);
     }
     if (key == 27) exit(0); // Esc
 }
 
-void keyboardUp(unsigned char key, int, int) { keyDown[key] = false; }
+void keyboardUp(unsigned char key, int, int) { keyDown[(unsigned char)tolower(key)] = false; }
 void specialDown(int key, int, int) { specialKeyDown[key] = true; }
 void specialUp(int key, int, int) { specialKeyDown[key] = false; }
 
@@ -521,7 +906,7 @@ void timerFunc(int) {
 }
 
 // ----------------------------------------------------------------
-// SECTION 10 — ENTRY POINT
+// SECTION 10 â€” ENTRY POINT
 // ----------------------------------------------------------------
 int main(int argc, char** argv) {
     glutInit(&argc, argv);
